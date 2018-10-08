@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"math"
+	"strings"
 	"sync"
 
 	"fmt"
@@ -29,6 +30,8 @@ type Client interface {
 
 	// Minimum and maximum time range of data in the store.
 	TimeRange() (mint int64, maxt int64)
+
+	String() string
 }
 
 // ProxyStore implements the store API that proxies request to all given underlying stores.
@@ -89,6 +92,8 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 		g         errgroup.Group
 	)
 
+	var storeDebugMsgs []string
+
 	stores, err := s.stores(srv.Context())
 	if err != nil {
 		level.Error(s.logger).Log("err", err)
@@ -99,8 +104,11 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 		// it cannot have series matching our query.
 		// NOTE: all matchers are validated in labelsMatches method so we explicitly ignore error.
 		if ok, _ := storeMatches(st, r.MinTime, r.MaxTime, newMatchers...); !ok {
+			storeDebugMsgs = append(storeDebugMsgs, fmt.Sprintf("store %s filtered out", st))
 			continue
 		}
+		storeDebugMsgs = append(storeDebugMsgs, fmt.Sprintf("store %s queried", st))
+
 		sc, err := st.Series(srv.Context(), &storepb.SeriesRequest{
 			MinTime:             r.MinTime,
 			MaxTime:             r.MaxTime,
@@ -123,10 +131,12 @@ func (s *ProxyStore) Series(r *storepb.SeriesRequest, srv storepb.Store_SeriesSe
 	}
 	if len(seriesSet) == 0 {
 		err := errors.New("No store matched for this query")
-		level.Warn(s.logger).Log("err", err)
+		level.Warn(s.logger).Log("err", err, "stores", strings.Join(storeDebugMsgs, ";"))
 		respCh <- storepb.NewWarnSeriesResponse(err)
 		return nil
 	}
+
+	level.Debug(s.logger).Log("msg", strings.Join(storeDebugMsgs, ";"))
 
 	g.Go(func() error {
 		defer close(respCh)
